@@ -95,6 +95,7 @@ final class SetupModel: ObservableObject {
     @Published var quickNoteTriggerMode: RecordingTriggerMode = .hold
     @Published var longNoteTriggerMode: RecordingTriggerMode = .toggle
     @Published var quickNoteHoldDelayMilliseconds = QuickNoteHoldDelay.defaultMilliseconds
+    @Published var savedSessions: [SavedSession] = []
 
     var requestMicrophone: () -> Void = {}
     var chooseMicrophone: (String) -> Void = { _ in }
@@ -107,6 +108,10 @@ final class SetupModel: ObservableObject {
     var setTranscriptionLanguage: (TranscriptionLanguage) -> Void = { _ in }
     var setCircleMinimumAngle: (Double) -> Void = { _ in }
     var setHotkeyConfiguration: (HotkeyConfiguration) -> Void = { _ in }
+    var copyText: (String) -> Bool = { _ in false }
+    var copyImage: (URL) -> Bool = { _ in false }
+    var copySession: (SavedSession) -> Bool = { _ in false }
+    var openSavedSessions: () -> Void = {}
     var refresh: () -> Void = {}
     var complete: () -> Void = {}
 
@@ -135,8 +140,9 @@ final class SetupModel: ObservableObject {
     }
 }
 
-private enum SetupSection: String, CaseIterable, Identifiable {
+enum SetupSection: String, CaseIterable, Identifiable {
     case overview
+    case history
     case dictation
     case visualContext
     case shortcuts
@@ -147,6 +153,7 @@ private enum SetupSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .overview: return "Overview"
+        case .history: return "History"
         case .dictation: return "Dictation"
         case .visualContext: return "Visual context"
         case .shortcuts: return "Shortcuts"
@@ -157,6 +164,7 @@ private enum SetupSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .overview: return "Your recording setup at a glance."
+        case .history: return "Recent recordings, ready to copy."
         case .dictation: return "Microphone, language, and local models."
         case .visualContext: return "Screen capture and circle detection."
         case .shortcuts: return "Choose how BetterVoice starts and stops."
@@ -167,6 +175,7 @@ private enum SetupSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .overview: return "rectangle.grid.2x2"
+        case .history: return "clock.arrow.circlepath"
         case .dictation: return "waveform"
         case .visualContext: return "scope"
         case .shortcuts: return "command"
@@ -177,7 +186,12 @@ private enum SetupSection: String, CaseIterable, Identifiable {
 
 struct SetupView: View {
     @ObservedObject var model: SetupModel
-    @State private var selection: SetupSection = .overview
+    @State private var selection: SetupSection
+
+    init(model: SetupModel, section: SetupSection = .overview) {
+        self.model = model
+        _selection = State(initialValue: section)
+    }
 
     private enum Links {
         static let guide = URL(string: "https://github.com/TarunTomar122/better-voice#use-it")!
@@ -219,6 +233,8 @@ struct SetupView: View {
         switch selection {
         case .overview:
             overview
+        case .history:
+            HistoryView(model: model)
         case .dictation:
             dictation
         case .visualContext:
@@ -630,7 +646,7 @@ struct SetupView: View {
             Divider()
             Label("Saved sessions", systemImage: "folder")
                 .font(.headline)
-            Text("Use Recent in the menu bar to copy the latest transcript or images, or open Saved Sessions to browse the local folders.")
+            Text("Browse and copy saved sessions in History. Recent in the menu bar copies the latest transcript or images, and Open Saved Sessions shows the local folders.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Link(destination: Links.guide) {
@@ -1465,10 +1481,10 @@ private struct CapturePreview: View {
 final class SetupWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
 
-    func show(model: SetupModel, onboarding: Bool = false) {
+    func show(model: SetupModel, onboarding: Bool = false, section: SetupSection = .overview) {
         let rootView = onboarding
             ? AnyView(OnboardingView(model: model))
-            : AnyView(SetupView(model: model))
+            : AnyView(SetupView(model: model, section: section))
         if let window {
             window.contentViewController = NSHostingController(rootView: rootView)
             window.title = onboarding ? "Welcome to BetterVoice" : "BetterVoice Settings"

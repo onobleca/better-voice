@@ -58,6 +58,10 @@ public enum DeveloperTextCleanup {
 
     private static let ambiguousTerms: Set<String> = ["rest", "rag", "crud", "whisper", "parakeet", "ai"]
 
+    /// A user term that becomes one of these is a spoken connector ("dash"), so it
+    /// also takes the spaces around it: "large dash modal" reads "large-modal".
+    private static let connectors: Set<String> = ["-", "_", "/"]
+
     /// - Parameter overrides: the user's own corrections, from `VocabularyFile`.
     ///   They run before the built-in table and in the order given, so a caller can
     ///   put longer phrases first, and a source listed here replaces the built-in
@@ -75,7 +79,12 @@ public enum DeveloperTextCleanup {
             }
         }
         for (source, replacement) in overrides {
-            result = replaceWholePhrase(source, with: replacement, in: result)
+            result = replaceWholePhrase(
+                source,
+                with: replacement,
+                in: result,
+                joining: connectors.contains(replacement)
+            )
         }
         let overridden = Set(overrides.map { $0.0.lowercased() })
         for (source, replacement) in terms {
@@ -90,12 +99,18 @@ public enum DeveloperTextCleanup {
     /// keeps filenames, domains, paths, and hyphenated compounds protected too.
     private static let wordCharacters = #"\p{L}\p{M}0-9_./\-"#
 
-    private static func replaceWholePhrase(_ source: String, with replacement: String, in text: String) -> String {
+    private static func replaceWholePhrase(
+        _ source: String,
+        with replacement: String,
+        in text: String,
+        joining: Bool = false
+    ) -> String {
         // Allow sentence punctuation while protecting filenames and domains. A dot
         // followed by a word or path character still belongs to the same token.
         let trailingCharacters = #"\p{L}\p{M}0-9_/-"#
+        let padding = joining ? #"[ \t]*"# : ""
         guard let expression = try? NSRegularExpression(
-            pattern: "(?i)(?<![\(wordCharacters)])\(NSRegularExpression.escapedPattern(for: source))(?![\(trailingCharacters)])(?!\\.[\(trailingCharacters)])"
+            pattern: "(?i)\(padding)(?<![\(wordCharacters)])\(NSRegularExpression.escapedPattern(for: source))(?![\(trailingCharacters)])(?!\\.[\(trailingCharacters)])\(padding)"
         ) else { return text }
         let mutable = NSMutableString(string: text)
         let range = NSRange(location: 0, length: mutable.length)

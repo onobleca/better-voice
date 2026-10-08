@@ -772,12 +772,14 @@ private final class TrailOverlayController {
             view.layerContentsRedrawPolicy = .onSetNeedsDisplay
             view.layer?.backgroundColor = NSColor.clear.cgColor
 
+            // screen.frame is already in global coordinates. Passing `screen:` as well
+            // makes AppKit treat the rect as relative to that screen and apply its
+            // origin twice, which pushes the overlay off every non-primary display.
             let window = TrailOverlayWindow(
                 contentRect: screen.frame,
                 styleMask: [.borderless, .nonactivatingPanel],
                 backing: .buffered,
-                defer: false,
-                screen: screen
+                defer: false
             )
             window.isOpaque = false
             window.backgroundColor = .clear
@@ -1378,6 +1380,7 @@ private final class InputMonitor {
     private var modifierLongActive = false
     private var quickKeyActive = false
     private var quickHoldActive = false
+    private var longTriggeredDuringQuickHold = false
     private var quickNoteRecording = false
     private var quickDoubleTapDetector = ModifierDoubleTapDetector()
     private var quickToggleTapDetector = ModifierToggleTapDetector()
@@ -1647,6 +1650,7 @@ private final class InputMonitor {
     private func beginQuickShortcut() {
         guard !quickHoldActive else { return }
         quickHoldActive = true
+        longTriggeredDuringQuickHold = false
         pushToTalkTimer?.invalidate()
         let timer = Timer(
             timeInterval: TimeInterval(hotkeyConfiguration.quickHoldDelayMilliseconds) / 1000,
@@ -1687,6 +1691,10 @@ private final class InputMonitor {
         pushToTalkTimer?.invalidate()
         pushToTalkTimer = nil
         if quickHoldActive {
+            // One long trigger per quick hold: pressing the rest of the chord again
+            // while the quick modifier stays down must not toggle the recording back.
+            guard !longTriggeredDuringQuickHold else { return }
+            longTriggeredDuringQuickHold = true
             promoteToLongForm()
         } else if quickNoteRecording {
             quickNoteRecording = false
@@ -1705,6 +1713,7 @@ private final class InputMonitor {
         modifierLongActive = false
         quickKeyActive = false
         quickHoldActive = false
+        longTriggeredDuringQuickHold = false
         quickNoteRecording = false
         quickDoubleTapDetector.reset()
         quickToggleTapDetector.reset()
@@ -1860,7 +1869,14 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         model.setHotkeyConfiguration = { [weak self] configuration in
             self?.setHotkeyConfiguration(configuration)
         }
-        model.refresh = { [weak self] in self?.refreshSetupModel() }
+        model.copyText = { Clipboard.copyTextOnly($0) }
+        model.copyImage = { Clipboard.copy(transcript: "", images: [$0]) }
+        model.copySession = { Clipboard.copy(transcript: $0.transcript, images: $0.images) }
+        model.openSavedSessions = { [weak self] in self?.openSavedSessions() }
+        model.refresh = { [weak self] in
+            self?.refreshSetupModel()
+            self?.refreshSavedSessions()
+        }
         model.complete = { [weak self] in
             UserDefaults.standard.set(true, forKey: "completedOnboarding")
             self?.setupWindow.close()
@@ -1913,6 +1929,9 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         recentItem.submenu = recentMenu
         self.recentMenu = recentMenu
         menu.addItem(recentItem)
+        let historyItem = NSMenuItem(title: "History…", action: #selector(showHistory), keyEquivalent: "")
+        historyItem.target = self
+        menu.addItem(historyItem)
         menu.addItem(NSMenuItem.separator())
 
         let setupItem = NSMenuItem(title: "Settings…", action: #selector(showSetup), keyEquivalent: ",")
@@ -2243,9 +2262,24 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         showSetupWindow(onboarding: !UserDefaults.standard.bool(forKey: "completedOnboarding"))
     }
 
-    private func showSetupWindow(onboarding: Bool) {
+    @objc private func showHistory() {
+        showSetupWindow(
+            onboarding: !UserDefaults.standard.bool(forKey: "completedOnboarding"),
+            section: .history
+        )
+    }
+
+    private func showSetupWindow(onboarding: Bool, section: SetupSection = .overview) {
         refreshSetupModel()
-        setupWindow.show(model: setupModel, onboarding: onboarding)
+        refreshSavedSessions()
+        setupWindow.show(model: setupModel, onboarding: onboarding, section: section)
+    }
+
+    private func refreshSavedSessions() {
+        let sessions = SavedSessionHistory.load(from: SessionStorage.root)
+        if sessions != setupModel.savedSessions {
+            setupModel.savedSessions = sessions
+        }
     }
 
     private func setCircleMinimumAngle(_ degrees: Double) {
@@ -2402,6 +2436,7 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
             try SessionStorage.clear()
+            refreshSavedSessions()
             showStatus("Saved sessions cleared", resetAfter: 4)
         } catch {
             showError("Could not clear saved sessions", detail: error.localizedDescription)
@@ -2468,6 +2503,10 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
             recordingMode = .longForm
             showStatus("Recording • long-form mode")
             updateMenuTitle("Stop long recording (\(longShortcutLabel))", enabled: true)
+        } else if state == .recording, recordingMode == .longForm {
+            // The quick modifier landed first on the way to the long chord, so the
+            // press arrived here instead of toggleRecording. It still means stop.
+            stopRecording()
         }
     }
 
@@ -2709,25 +2748,36 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
             let copied = Clipboard.copy(transcript: "", images: images)
             let imageClipboardChangeCount = NSPasteboard.general.changeCount
             let pasted = copied && TextInsertion.paste(into: insertionContext)
-            if let restoreClipboard {
-                Clipboard.restore(restoreClipboard, ifChangeCount: NSPasteboard.general.changeCount)
-            } else if pasted, NSPasteboard.general.changeCount == imageClipboardChangeCount {
-                _ = Clipboard.copy(transcript: transcript, images: images)
+            let finish = { [weak self] in
+                guard let self else { return }
+                if let restoreClipboard {
+                    Clipboard.restore(restoreClipboard, ifChangeCount: imageClipboardChangeCount)
+                } else if pasted, NSPasteboard.general.changeCount == imageClipboardChangeCount {
+                    _ = Clipboard.copy(transcript: transcript, images: images)
+                }
+                self.finishRecordingUI()
+                let message: String
+                if pasted {
+                    message = "Inserted transcript + context"
+                } else if copied && restoreClipboard == nil {
+                    message = "Inserted transcript • images copied"
+                } else {
+                    message = "Inserted transcript • image paste failed"
+                }
+                self.showStatus(
+                    message,
+                    resetAfter: 4
+                )
+                self.pruneSavedSessions()
             }
-            self.finishRecordingUI()
-            let message: String
+            // The paste keystroke is only queued for the target app at this point.
+            // Changing the clipboard straight away makes the app paste whatever
+            // replaces the images, so leave them in place until it has read them.
             if pasted {
-                message = "Inserted transcript + context"
-            } else if copied && restoreClipboard == nil {
-                message = "Inserted transcript • images copied"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: finish)
             } else {
-                message = "Inserted transcript • image paste failed"
+                finish()
             }
-            self.showStatus(
-                message,
-                resetAfter: 4
-            )
-            self.pruneSavedSessions()
         }
     }
 
@@ -2744,6 +2794,7 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         refreshLanguageMenu()
         setStatusIcon(.idle)
         updateMenuTitle("Start long recording (\(longShortcutLabel))", enabled: true)
+        refreshSavedSessions()
     }
 
     private func handleMouse(quartzPoint: CGPoint) {

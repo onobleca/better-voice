@@ -94,6 +94,31 @@ final class DeveloperTextCleanupTests: XCTestCase {
         )
     }
 
+    func testAUserTermThatBecomesAConnectorJoinsTheWordsAroundIt() {
+        XCTAssertEqual(
+            DeveloperTextCleanup.apply(
+                "a frame small dash modal dash w dash character dash center and here",
+                overrides: [("dash", "-")]
+            ),
+            "a frame small-modal-w-character-center and here"
+        )
+        XCTAssertEqual(
+            DeveloperTextCleanup.apply("Dash is the prefix. Name it btn dash.", overrides: [("dash", "-")]),
+            "-is the prefix. Name it btn-."
+        )
+        XCTAssertEqual(
+            DeveloperTextCleanup.apply("open the dashboard in my-dash-file", overrides: [("dash", "-")]),
+            "open the dashboard in my-dash-file"
+        )
+    }
+
+    func testOtherUserTermsKeepTheSpacesAroundThem() {
+        XCTAssertEqual(
+            DeveloperTextCleanup.apply("the acme app", overrides: [("acme", "ACME")]),
+            "the ACME app"
+        )
+    }
+
     func testAccentedWordsThatBeginWithATermAreLeftAlone() {
         XCTAssertEqual(
             DeveloperTextCleanup.apply("o apiário fica no sítio"),
