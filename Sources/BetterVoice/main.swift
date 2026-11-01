@@ -2617,9 +2617,11 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
 
     private func finishSession(transcriptionError: Error? = nil) {
         let session = output
-        let shouldCopyToClipboard = recordingMode == .longForm
         let hadTranscript = !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasContext = !(session?.images.isEmpty ?? true)
+        // With no speech the screenshot is the whole result, so it reaches the
+        // clipboard in every recording mode.
+        let shouldCopyToClipboard = recordingMode == .longForm || (!hadTranscript && hasContext)
         let elapsed = recordingStartedAt.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0
         let disposition = sessionCompletionDisposition(
             hasTranscript: hadTranscript,
@@ -2680,9 +2682,16 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
                 )
                 return
             }
+            let pastedScreenshotOnly = transcriptionError == nil
+                && !hadTranscript
+                && hasContext
+                && result.clipboardCopied
+                && textInsertionContext.map(TextInsertion.paste(into:)) == true
             finishRecordingUI()
 
-            if let transcriptionError {
+            if pastedScreenshotOnly {
+                showStatus("Screenshot pasted • also on clipboard", resetAfter: 4)
+            } else if let transcriptionError {
                 let delivery = !shouldCopyToClipboard
                     ? "Session saved."
                     : result.clipboardCopied
